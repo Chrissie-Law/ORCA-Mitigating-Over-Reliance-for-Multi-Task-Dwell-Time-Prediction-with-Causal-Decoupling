@@ -27,6 +27,7 @@ class IndustryDataset(torch.utils.data.Dataset):
                 self.data.drop((self.data.loc[self.data['label_ctr'] == 0]).index, inplace=True)
                 self.data = self.data.reset_index(drop=True)
 
+            # Select effective features according to "leave-one-out" analysis.
             self.normal_train_features = ['uin', 'hashed_docid', 'net_type', 'feeds_show_type', 'search_time',
                                           'title_tag_hash0', 'title_tag_hash1', 'title_tag_hash2',
                                           'category', 'subcategory', 'doc_pubtime', 'data_source']
@@ -48,6 +49,12 @@ class IndustryDataset(torch.utils.data.Dataset):
             self.labels_data = self.data[self.labels]
             self.label0_data = self.data[self.labels[0]]
             self.label1_data = self.data[self.labels[1]]
+
+            self.X = torch.from_numpy(self.normal_fea_data.to_numpy(dtype=np.int64))
+            self.block_X = torch.from_numpy(self.block_fea_data.to_numpy(dtype=np.int64))
+            self.Y = torch.from_numpy(self.labels_data.to_numpy(dtype=np.int64))
+            self.Y0 = torch.from_numpy(self.label0_data.to_numpy(dtype=np.int64))
+            self.Y1 = torch.from_numpy(self.label1_data.to_numpy(dtype=np.int64))
 
             self.feature_dims = np.max(self.data[self.normal_train_features], axis=0) + 1  # length of one-hot
             self.feature_dims[self.dynamic_features[-1]] = self.feature_dims[self.dynamic_features].max()
@@ -88,20 +95,23 @@ class IndustryDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self.data.shape[0]
 
-    def __getitem__(self, index):  # 基于索引进行后续操作，所以需要重定义
+    def change_mode(self, mode_str):
+        self.mode = mode_str
+
+    def __getitem__(self, index):
         if len(self.task_types) == 2:
-            if 'fea' in self.model_name:  # or 'ctr' in self.model_name:
-                return self.normal_and_block_fea_data.iloc[index].values, \
-                       self.labels_data.iloc[index].values  # block feature加入训练
+            # multi-task: return [features], [ctr,label_time]
+            if self.mode != 'normal':
+                return self.X[index], self.block_X[index], self.Y[index]
+                # return self.block_X[index], self.Y[index]
             else:
-                return self.normal_fea_data.iloc[index].values, \
-                       self.labels_data.iloc[index].values  # 多目标
+                return self.X[index], self.Y[index]
         elif self.task_types[0] == 'binary':
-            return self.normal_fea_data.iloc[index].values, \
-                   self.label0_data.iloc[index]
+            # single binary task: return [features], ctr
+            return self.X[index], self.Y0[index]
         else:
-            return self.normal_fea_data.iloc[index].values, \
-                   self.label1_data.iloc[index]
+            # single dwell‐time task: return [features], time_bucket
+            return self.X[index], self.Y1[index]
 
     @staticmethod
     def pad_sequence(sequence, maxlen):

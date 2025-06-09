@@ -41,6 +41,11 @@ class TenRec(torch.utils.data.Dataset):
             self.label0_data = self.data[self.labels[0]]
             self.label1_data = self.data[self.labels[1]]
 
+            self.X = torch.from_numpy(self.normal_fea_data.to_numpy(dtype=np.int64))
+            self.Y = torch.from_numpy(self.labels_data.to_numpy(dtype=np.int64))
+            self.Y0 = torch.from_numpy(self.label0_data.to_numpy(dtype=np.int64))
+            self.Y1 = torch.from_numpy(self.label1_data.to_numpy(dtype=np.int64))            
+
             self.feature_dims = np.max(self.data[self.normal_train_features], axis=0) + 1  # length of one-hot
 
             self.print_inf(print_file)
@@ -64,40 +69,40 @@ class TenRec(torch.utils.data.Dataset):
         self.task_types = task_types
         self.model_name = model_name
 
-        # 从模型训练的角度划分，选择有效的特征，由于TenRec数据集没有标题相关特征，因此没有fea的方法；也剔除总点击量、推荐评分等较强特征
+        # Select effective features according to "leave-one-out" analysis.
+        # Since the TenRec dataset does not have significant title-related features, the fea-level intervention method is not used; also, features such as total clicks and recommendation scores are excluded as they are too strong.
         self.normal_train_features = ['user_id', 'item_id', 'gender', 'age', 'category_second', 'category_first']
         self.total_features = self.normal_train_features
 
-        # 从数据处理的角度划分，区分稀疏特征和稠密特征
         sparse_features = ['user_id', 'item_id', 'gender', 'category_second', 'category_first']
         dense_features = ['age']
-        self.static_features = sparse_features + dense_features  # 定长数据
+        self.static_features = sparse_features + dense_features  
 
-        # 稠密特征离散化
         data['age'] = data['age'].fillna(data['age'].mean()).astype(int)  # doc_pubtime
         min_age = 8
         data.loc[data['age'] < min_age, 'age'] = min_age
         data['age'] = pd.cut(data['age'], bins=15, labels=False)
 
-        # 定长特征数据数字化
         data[self.static_features].fillna('-1', inplace=True)
         for fea in self.static_features:
             lbe = LabelEncoder()
             data[fea] = lbe.fit_transform(data[fea].astype(str))
 
-        # 保存以及取所需数据
         self.data = data[self.total_features+self.labels+['read_time']]
         self.data.to_pickle(preprocess_path)
         if (len(task_types) == 1) and (task_types[0] != 'binary'):
             self.data.drop((data.loc[data['label_ctr'] == 0]).index, inplace=True)
             self.data = self.data.reset_index(drop=True)
-        # self.data = self.data[:20000]
 
-        # 方便后续读取数据
         self.normal_fea_data = self.data[self.normal_train_features]
         self.labels_data = self.data[self.labels]
         self.label0_data = self.data[self.labels[0]]
         self.label1_data = self.data[self.labels[1]]
+
+        self.X = torch.from_numpy(self.normal_fea_data.to_numpy(dtype=np.int64))
+        self.Y = torch.from_numpy(self.labels_data.to_numpy(dtype=np.int64))
+        self.Y0 = torch.from_numpy(self.label0_data.to_numpy(dtype=np.int64))
+        self.Y1 = torch.from_numpy(self.label1_data.to_numpy(dtype=np.int64))        
 
         # field dim处理
         self.feature_dims = np.max(data[self.normal_train_features], axis=0) + 1  # length of one-hot
@@ -133,17 +138,19 @@ class TenRec(torch.utils.data.Dataset):
     def __len__(self):
         return self.data.shape[0]
 
-    def __getitem__(self, index):  # 基于索引进行后续操作，所以需要重定义
+    def change_mode(self, mode_str):
+        raise NotImplementedError('TenRec dataset does not support change_mode function, '
+                                  'because its features are anonymous.')
+
+    def __getitem__(self, idx):
+        x = self.X[idx]  # very fast
         if len(self.task_types) == 2:
-            assert ('fea' not in self.model_name), 'TenRec is not suitable for fea-model'
-            return self.normal_fea_data.iloc[index].values, \
-                   self.labels_data.iloc[index].values  # 多目标
+            y = self.Y[idx]  # [ctr, time‐bucket]
         elif self.task_types[0] == 'binary':
-            return self.normal_fea_data.iloc[index].values, \
-                   self.label0_data.iloc[index]
+            y = self.Y0[idx]  # just ctr
         else:
-            return self.normal_fea_data.iloc[index].values, \
-                   self.label1_data.iloc[index]
+            y = self.Y1[idx]  # just time
+        return x, y
 
     @staticmethod
     def pad_sequence(sequence, maxlen):
