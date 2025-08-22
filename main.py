@@ -412,8 +412,6 @@ def train_balance(model, optimizer, optimizer_sharedLayer, optimizer_taskLayer, 
 
 
 def test(model, data_loader, alpha, device, mode='valid', time_map=[], ori_time=[], result_dir="", lam=-1):
-    # ctr的指标是auc
-    # time的主要指标是MSE，还有MAE，NDCG@5，NDCG@10
     model.eval()
     task_types = model.task_types
     targets, predicts, user_id, doc_id = defaultdict(list), defaultdict(list), list(), list()
@@ -443,7 +441,7 @@ def test(model, data_loader, alpha, device, mode='valid', time_map=[], ori_time=
         return get_test_result(targets, predicts, user_id, doc_id,
                                f'{result_dir}/dwell time predict result_{model.model_name}.txt',
                                alpha, task_types, mode, time_map, ori_time)
-    else :
+    else:
         return get_test_result_EXUM(targets, predicts, user_id,
                             f'{result_dir}/dwell time predict result_{model.model_name}.txt',
                             alpha, task_types, mode, time_map, ori_time, c, lam)
