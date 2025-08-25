@@ -42,6 +42,9 @@ def get_dataset(name, dataset_path, model_name, task_types, print_file):
 
 
 def get_model(name, dataset, task_types, config):
+    """
+    Build the ORCA model
+    """
     feature_dims = dataset.feature_dims
     time_dim = len(dataset.time_map)
     tower_dims = config.tower_dims
@@ -93,18 +96,40 @@ class EarlyStopper(object):
             return False
 
 
+
 def get_test_result(targets, predicts, user_id, doc_id, time_result_file, criterion_coe, task_types, mode, time_map, ori_time):
+    """
+    Compute evaluation metrics and (in test mode) dump per-sample predictions.
+
+    Notes:
+        - For MTL, dwell-time (DT) metrics are computed on clicked samples only.
+        - Writes a CSV with ground-truth and predictions when mode == 'test'.
+        - Aggregates both raw DT head and final debiased head metrics.
+
+    Args:
+        targets, predicts (dict): Dicts keyed by task_types plus 'final' for ORCA.
+        user_id, doc_id (List): Per-sample identifiers.
+        time_result_file (str): Output file path (.txt, corresponding .csv is written).
+        criterion_coe (List[float]): Loss weights [alpha, beta].
+        task_types (List[str]): Tasks (e.g., ['binary','multiclass']).
+        mode (str): 'valid' or 'test'.
+        time_map (dict): Bucket index -> time mapping.
+        ori_time (List[float]): Original read-time values.
+
+    Returns:
+        dict: Aggregated metric dictionary.
+    """
     result_dict = dict()
-    if 'binary' in task_types:  # 单任务二分类（ctr）时，以auc为评判标准
+    if 'binary' in task_types:  # Single-task CTR uses AUC as the main metric
         result_dict['AUC'] = roc_auc_score(targets['binary'], predicts['binary'])
         result_dict['LogLoss'] = log_loss(targets['binary'], predicts['binary'])
 
-    if len(task_types) > 1:     # dwell time计算只取点击过的物品
+    if len(task_types) > 1:     # For DT, keep only clicked items
         tmp_df = pd.DataFrame({'binary': targets['binary'], 'multi_targets': targets['multiclass'],
                                'binary_predicts': predicts['binary'],
                                'multi_predicts': predicts['multiclass'], 'final_predicts': predicts['final'],
                                'uin': user_id, 'doc_id': doc_id,})
-        tmp_df = tmp_df.loc[tmp_df['binary'] > 0]  # 只保留点击过的样本
+        tmp_df = tmp_df.loc[tmp_df['binary'] > 0]  # Keep only clicked samples
         targets['multiclass'] = tmp_df['multi_targets'].to_list()
         predicts['multiclass'] = tmp_df['multi_predicts'].to_list()
         predicts['final'] = tmp_df['final_predicts'].to_list()
@@ -120,6 +145,7 @@ def get_test_result(targets, predicts, user_id, doc_id, time_result_file, criter
         result_dict.update({'cross_entropy': log_loss(targets['multiclass'], predicts['multiclass'])})
         result_dict.update({'cross_entropy_final': log_loss(targets['multiclass'], predicts['final'])})
         if mode == 'test':
+            # Classification metrics for raw DT head
             predicts_multiclass = np.argmax(predicts['multiclass'], 1)
             result_dict.update(
                 {'MSE_class': mean_squared_error(targets['multiclass'], predicts_multiclass),
@@ -141,6 +167,7 @@ def get_test_result(targets, predicts, user_id, doc_id, time_result_file, criter
                                                average='weighted', multi_class='ovr')
                  })
 
+            # Classification metrics for final (debiased) DT head
             predicts_final = np.argmax(predicts['final'], 1)
             result_dict.update(
                 {'MSE_f_class': mean_squared_error(targets['multiclass'], predicts_final),
@@ -162,13 +189,16 @@ def get_test_result(targets, predicts, user_id, doc_id, time_result_file, criter
                                                  average='weighted', multi_class='ovr')
                  })
 
+            # Regression-style metrics by mapping bucket -> time
             if 'binary' in task_types:
                 tmp_df = pd.DataFrame({'binary': targets['binary'], 'ori_time': ori_time})
-                targets_t = tmp_df['ori_time'].loc[tmp_df['binary'] > 0].to_list()  # 原用户阅读时间
+                targets_t = tmp_df['ori_time'].loc[tmp_df['binary'] > 0].to_list()  # Ground-truth read time
             else:
                 targets_t = ori_time
-            predicts_t = list(map(time_map.get, np.argmax(predicts['multiclass'], 1)))  # 多分类标签映射回时间
-            predicts_t_final = list(map(time_map.get, np.argmax(predicts['final'], 1)))
+            predicts_t = list(map(time_map.get, np.argmax(predicts['multiclass'], 1)))  # raw head
+            predicts_t_final = list(map(time_map.get, np.argmax(predicts['final'], 1)))  # debiased head
+
+            # Per-user NDCG (k=3/5)
             data_tmp = pd.DataFrame({'user_id': user_id, 'targets': targets_t,
                                      'predicts': predicts_t, 'predicts_final': predicts_t_final})
             ncdg3, ncdg5 = list(), list()
@@ -200,6 +230,7 @@ def get_test_result(targets, predicts, user_id, doc_id, time_result_file, criter
                                 'NDCG@5_f': np.mean(ncdg5_f)
                                 })
 
+            # Write per-sample outputs
             print_file = open(time_result_file, mode='w+')
             print(list(result_dict.items()), file=print_file)
             print(f'targets, predicts,  predicts_final  #{len(targets_t)}', file=print_file)
@@ -209,8 +240,8 @@ def get_test_result(targets, predicts, user_id, doc_id, time_result_file, criter
 
     if mode == 'test':
         # ---------- extra info for each clicked sample ----------
-        bucket_pred = np.argmax(predicts['multiclass'], 1)  # 预测桶
-        bucket_pred_final = np.argmax(predicts['final'], 1)  # 修正后预测桶
+        bucket_pred = np.argmax(predicts['multiclass'], 1)  # predicted bucket (raw)
+        bucket_pred_final = np.argmax(predicts['final'], 1)  # predicted bucket (final/debiased)
 
         # ---------- save to CSV ----------
         save_df = pd.DataFrame({
@@ -230,7 +261,17 @@ def get_test_result(targets, predicts, user_id, doc_id, time_result_file, criter
 
 
 def train(model, optimizer, data_loader, criterion, device, log_interval=20, print_file=None, config=None):
-    if config.use_block_fea:
+    """
+    Train loop for ORCA.
+
+    Supports:
+      - Feature masking (config.use_mask_fea / mask_fea_ratio).
+      - MetaBalance optimization for shared/task layers when base_model includes 'balance'.
+      - Separate optimizer for 'united' (bias) tower when use_mask_fea is enabled.
+
+    Logs averaged losses every `log_interval` steps.
+    """
+    if config.use_mask_fea:
         optimizer_united = optimizer['united']
         optimizer = optimizer['normal']
     if 'balance' in config.base_model:
@@ -238,14 +279,14 @@ def train(model, optimizer, data_loader, criterion, device, log_interval=20, pri
         optimizer_taskLayer, optimizer_sharedLayer = optimizer['task'], optimizer['shared']
     model.train()
     total_loss, total_loss1, total_loss2, total_loss3 = 0, 0, 0, 0
-    block_fea_cnt = 0
+    mask_fea_cnt = 0
     tk0 = tqdm.tqdm(data_loader, desc="train", smoothing=0, mininterval=10.0)
 
     for i, batch in enumerate(tk0):
-        if len(batch) == 3:  # (x_main , x_block , y)
-            fields, fields_block, target = batch
+        if len(batch) == 3:  # (x_main , x_mask , y)
+            fields, fields_mask, target = batch
             fields = fields.to(device)
-            fields_block = fields_block.to(device)
+            fields_mask = fields_mask.to(device)
         else:  # (x , y)
             fields, target = batch
             fields = fields.to(device)
@@ -273,16 +314,16 @@ def train(model, optimizer, data_loader, criterion, device, log_interval=20, pri
             optimizer.step()
 
         if len(batch) == 3:
-            block_fea_cnt += 1
-            y = model(fields_block)  # forward with block features
+            mask_fea_cnt += 1
+            y = model(fields_mask)  # forward with masking features
             loss = criterion(y, target)
             model.zero_grad()
             loss.backward()
             optimizer_united.step()
             data_loader.dataset.dataset.change_mode('normal')  # next batch will use normal features
 
-        if config.use_block_fea and random.random() < config.block_fea_ratio:
-            data_loader.dataset.dataset.change_mode('block')  # next batch will use block features
+        if config.use_mask_fea and random.random() < config.mask_fea_ratio:
+            data_loader.dataset.dataset.change_mode('mask')  # next batch will use mask features
 
         total_loss += loss.item()
         total_loss1 += criterion.loss1.item()
@@ -294,7 +335,7 @@ def train(model, optimizer, data_loader, criterion, device, log_interval=20, pri
             total_loss2 /= log_interval
             total_loss3 /= log_interval
             tk0.set_postfix(total_loss=f"{total_loss:.4f}", loss1=f"{total_loss1:.4f}",
-                            loss2=f"{total_loss2:.4f}", loss3=f"{total_loss3:.4f}", block_fea_cnt=block_fea_cnt)
+                            loss2=f"{total_loss2:.4f}", loss3=f"{total_loss3:.4f}", mask_fea_cnt=mask_fea_cnt)
             print(f'interval {i+1}:  train loss: {total_loss:.4f}, loss1: {total_loss1:.4f}, '
                   f'loss2:{total_loss2:.4f}, loss3:{total_loss3:.4f}', file=print_file)
             total_loss, total_loss1, total_loss2, total_loss3 = 0, 0, 0, 0
@@ -302,6 +343,13 @@ def train(model, optimizer, data_loader, criterion, device, log_interval=20, pri
 
 
 def test(model, data_loader, criterion_coe, device, mode='valid', time_map=[], ori_time=[], result_dir=""):
+    """
+    Evaluation loop.
+
+    - Applies softmax to both raw DT head and final (debiased) head.
+    - Collects targets/predictions for CTR and DT.
+    - Delegates metric computation and optional CSV dumping to `get_test_result`.
+    """
     model.eval()
     task_types = model.task_types
     targets, predicts, user_id, doc_id = defaultdict(list), defaultdict(list), list(), list()
@@ -326,9 +374,21 @@ def test(model, data_loader, criterion_coe, device, mode='valid', time_map=[], o
 
 
 def main_orca(dataset_name, dataset_path, model_name, task_types, epoch, learning_rate,
-              batch_size, weight_decay, device, save_dir, result_dir, config):  # config should be deleted
+              batch_size, weight_decay, device, save_dir, result_dir, config):
+    """
+    Entry point for training/evaluating ORCA.
+
+    Workflow:
+      1) Prepare device, seeds, logging files, and dataset/dataloaders.
+      2) Build model and set up optimizers (supports MetaBalance and united-head optimizer).
+      3) Define causal-weighted loss for ORCA.
+      4) Initial test → train/validate with early stopping → load best → final test.
+      5) Log metrics (stdout, file, and wandb).
+
+    Args mirror CLI flags passed from main.py.
+    """
     device = torch.device(device)
-    alpha = config.alpha  # 任务的loss比重 loss_ctr + alpha * loss_time + beta*loss_time_f
+    alpha = config.alpha  # loss weights: loss_ctr + alpha * loss_time + beta*loss_time_f
     beta = config.beta
     setup_random_seed(config.seed)
     save_path = save_dir  # f'{save_dir}/{dataset_name}/{model_name}.pth.tar'
@@ -359,14 +419,15 @@ def main_orca(dataset_name, dataset_path, model_name, task_types, epoch, learnin
     else:
         optimizer = optim.Adam([
             {'params': [p for n, p in model.named_parameters()
-                        if n.startswith("united_tower") or n.startswith("united_output_layers")],  # 只优化模型B部分
+                        if n.startswith("united_tower") or n.startswith("united_output_layers")],  # only bias tower
              'lr': learning_rate * config.united_lr_ratio},
             {'params': [p for n, p in model.named_parameters()
-                        if not (n.startswith("united_tower") or n.startswith("united_output_layers"))],  # 模型主体部分
+                        if not (n.startswith("united_tower") or n.startswith("united_output_layers"))],  # main body
              'lr': learning_rate}
         ], weight_decay=weight_decay)
 
-    if config.use_block_fea:
+    # Optimizer to update the united (bias) tower for `Feature-level Counterfactual Intervention`
+    if config.use_mask_fea:
         optimizer_united = optim.Adam(
             params=[p for n, p in model.named_parameters()
                     if n.startswith("united_tower") or n.startswith("united_output_layers")],
@@ -374,6 +435,7 @@ def main_orca(dataset_name, dataset_path, model_name, task_types, epoch, learnin
             weight_decay=weight_decay)
         optimizer = {'normal': optimizer, 'united': optimizer_united}
 
+    # Causal weighted loss integrates instance weighting and (optional) IPS modes
     criterion = Causal_Weighted_Loss(alpha=alpha, beta=beta, offset=config.offset,
                                      ctr_weight=config.ctr_weight, dt_weight=config.dt_weight,
                                      is_calc_inst_weight=getattr(config, 'use_inst', False),
@@ -382,18 +444,20 @@ def main_orca(dataset_name, dataset_path, model_name, task_types, epoch, learnin
 
     early_stopper = EarlyStopper(num_trials=config.early_stop, save_path=save_path, task_types=task_types)
 
+    # Initial test before training
     metric_dict = test(model, test_data_loader, [alpha, beta], device, mode='test', time_map=dataset.time_map,
                        ori_time=dataset.data['read_time'].iloc[test_dataset.indices].to_list(), result_dir=result_dir)
     print('init_test:', json.dumps(metric_dict, indent=2, ensure_ascii=False), file=print_file)
     print('init_test:', json.dumps(metric_dict, indent=2, ensure_ascii=False))
     wandb.log(metric_dict)
 
+    # Training loop
     log_interval = 5120 // batch_size if dataset_name != 'tenrec' else 51200 // batch_size
     for epoch_i in range(epoch_s, epoch):
         train(model, optimizer, train_data_loader, criterion, device,
               log_interval=log_interval, print_file=print_file, config=config)
 
-        metric_dict = test(model, valid_data_loader, [alpha, beta], device, mode='valid') # log result
+        metric_dict = test(model, valid_data_loader, [alpha, beta], device, mode='valid')  # log result
         print('epoch:', epoch_i, 'validation: ', json.dumps(metric_dict, indent=2, ensure_ascii=False))
         print('epoch:', epoch_i, 'validation: ', json.dumps(metric_dict, indent=2, ensure_ascii=False), file=print_file)
         wandb.log(metric_dict)
@@ -402,7 +466,8 @@ def main_orca(dataset_name, dataset_path, model_name, task_types, epoch, learnin
             print(f'validation: best auc: {early_stopper.best_accuracy:.4f}, best loss: {early_stopper.best_loss:.4f}',
                   file=print_file)
             break
-
+            
+    # Load best checkpoint and final test
     if os.path.exists(save_path):
         print('loading best model!')
         checkpoint = torch.load(save_path, map_location=device)

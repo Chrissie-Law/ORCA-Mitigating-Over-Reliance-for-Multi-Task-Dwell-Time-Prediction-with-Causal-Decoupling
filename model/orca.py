@@ -16,16 +16,19 @@ class ORCA(nn.Module):
                  tower_dims, task_types=['binary', 'regression'], dropout=0.2, time_dim=9,
                  base_model='mmoe', use_inter=False):
         """
-        :param feature_dims: 每一个sparse feature的one-hot长度，其中同一个field的feature只有一个非0
-        :param embed_dim: embedding的大小
-        :param num_shared_experts: 多个任务shared的expert个数
-        :param num_specific_experts: 每个任务特有的expert个数
-        :param experts_dims: expert的各层大小
-        :param tower_dims: tower的各层大小
-        :param task_types: 任务类型，决定每一个task的loss和output layer，
-                           "binary" for binary log loss, "regression" for regression loss
-        :param dropout: expert的dropout
-        :param time_dim: dwell time的输出分类数目
+        ORCA: Over-Reliance-decoupled CAusal multi-task model.
+        Supports multiple base MTL models (MMoE, PLE, MetaBalance).
+
+        :param feature_dims: One-hot length of each sparse feature field (only one active feature per field).
+        :param embed_dim: Dimension of the embedding vectors.
+        :param num_shared_experts: Number of shared experts across all tasks.
+        :param num_specific_experts: Number of task-specific experts per task.
+        :param experts_dims: Layer sizes for the expert networks.
+        :param tower_dims: Layer sizes for the task-specific tower networks.
+        :param task_types: List of task types; determines the loss function and output layer.
+                           Use "binary" for binary log loss and "regression" for regression loss.
+        :param dropout: Dropout rate applied in expert networks.
+        :param time_dim: Number of output classes for dwell-time prediction.
         """
         super(ORCA, self).__init__()
         self.model_name = 'orca'
@@ -49,6 +52,7 @@ class ORCA(nn.Module):
                                                  num_heads=2, num_layers=1, dropout=dropout, has_residual=True,
                                                  output_dim=experts_dims[-1][-1])
 
+        # Task-specific towers
         self.towers = list()
         for t in self.task_types:
             if t == 'binary':
@@ -65,24 +69,30 @@ class ORCA(nn.Module):
                                                              dropout=dropout, output_layer=False)
         self.towers = nn.ModuleList(self.towers)
 
+        # Output layers for CTR & DT heads
         self.output_layers = list()
         for t in self.task_types:
             if t == 'binary':
+                # CTR head: binary classification
                 self.output_layers.append(
                     nn.Sequential(nn.Linear(2 + tower_dims[0][-1], 8),
                                   nn.ReLU(),
                                   nn.Linear(8, 1),
                                   nn.Sigmoid()))
             else:
-                self.output_layers.append(nn.Sequential(nn.Linear(2 + tower_dims[1][-1], time_dim),
-                                                        nn.ReLU(),
-                                                        nn.Linear(time_dim, time_dim)))
+                # DT head: multi-class classification
+                self.output_layers.append(
+                    nn.Sequential(nn.Linear(2 + tower_dims[1][-1], time_dim),
+                                  nn.ReLU(),
+                                  nn.Linear(time_dim, time_dim)))
         self.output_layers = nn.ModuleList(self.output_layers)
 
+        # Output layer for debiased DT head
         self.united_output_layers = nn.Sequential(nn.Linear(2 + tower_dims[1][-1], time_dim),
                                                   nn.ReLU(),
                                                   nn.Linear(time_dim, time_dim))
 
+        # Expert modules: shared + task-specific
         if base_model == 'mmoe':
             if type(experts_dims[0]) is int:
                 mmoe_experts_dims = experts_dims
@@ -112,37 +122,74 @@ class ORCA(nn.Module):
         embed_x = self.embedding(x)  # shape: batch_size * num_fields * embed_dim
         experts_input = embed_x.view(-1, self.embed_output_dim)
         task_fea = self.experts(experts_input)  # shape: batch_size * experts_dims[-1]
-        if self.base_model == 'mmoe':
-            task_fea[-1] = task_fea[-1].detach()  # detach the last task's output for CTR
 
-        tower_output0 = self.towers[0](task_fea[0])  # ctr tower output
-        tower_output1 = self.towers[1](task_fea[1])
+        tower_output0 = self.towers[0](task_fea[0])         # CTR
+        tower_output1 = self.towers[1](task_fea[1])         # DT raw
+        towers_output = [tower_output0, tower_output1]
+
+        # Task interaction for united DT tower
         if self.use_inter:
             inter_task_fea = self.atten(torch.stack(task_fea[:2], dim=1).detach())
             united_tower_input = torch.cat((inter_task_fea, task_fea[-1]), dim=1)
         else:
             united_tower_input = task_fea[-1]
         united_tower_output = self.united_tower(united_tower_input)  # united tower output
-        towers_output = [tower_output0, tower_output1]
 
+        # Final outputs
         other_part = torch.cat((self.linear(x), self.fm(embed_x)), dim=1)
         results = [self.output_layers[i](torch.cat((other_part, towers_output[i]), dim=1)).squeeze(1)
                    for i in range(self.task_num)]
         united_result = self.united_output_layers(torch.cat((other_part.detach(), united_tower_output), dim=1)).squeeze(1)
-        final_result = results[-1].detach().clone() - united_result
 
+        # Debiased DT = raw DT - CTR-induced bias
+        final_result = results[-1].detach().clone() - united_result
         return results+[final_result]
 
 
 class Causal_Weighted_Loss(nn.Module):
+    """
+    Causal-weighted multi-task loss for ORCA.
+
+    - CTR: Binary cross-entropy on all samples.
+    - DT raw: Cross-entropy with optional IPS/CIPS/SNIPS/DR/MRDR reweighting.
+    - DT debiased: Cross-entropy with instance-level weights for CTR bias correction.
+
+    Inverse Propensity Score (IPS) is one of the most widely used counterfactual techniques for unbiased learning in
+    recommender systems. We implement several IPS variants to reweight the dwell-time loss:
+
+      * IPS: Inverse Propensity Scoring
+        Reference: Tobias Schnabel, Adith Swaminathan, Ashudeep Singh, Navin Chandak, and Thorsten Joachims. 2016.
+        Recommendations as treatments: Debiasing learning and evaluation. In International Conference on Machine
+        Learning. PMLR, 1670–1679.
+
+      * CIPS: Clipped IPS
+        Reference: Yuta Saito, Suguru Yaginuma, Yuta Nishino, Hayato Sakata, and Kazuhide Nakata. 2020. Unbiased
+        recommender learning from missing-not-at-random implicit feedback. In Proceedings of the 13th International
+        Conference on Web Search and Data Mining. 501–509.
+
+      * SNIPS: Self-Normalized IPS
+        Reference: Adith Swaminathan and Thorsten Joachims. 2015. The self-normalized estimator for counterfactual
+        learning. In Proceedings of the 28th International Conference on Neural Information Processing
+        Systems-Volume 2. 3231–3239.
+
+      * DR: Doubly-Robust
+        Reference: Miroslav Dudík, Dumitru Erhan, John Langford, and Lihong Li. 2014.
+        Doubly robust policy evaluation and optimization. Statist. Sci. 29, 4 (2014), 485–511.
+
+      * MRDR: More Robust Doubly-Robust
+        Reference: Siyuan Guo, Lixin Zou, Yiding Liu, Wenwen Ye, Suqi Cheng, Shuaiqiang Wang, Hechang Chen, Dawei Yin,
+        and Yi Chang. 2021. Enhanced doubly robust learning for debiasing post-click conversion rate estimation. In
+        Proceedings of the 44th International ACM SIGIR Conference on Research and Development in Information
+        Retrieval. 275–284.
+    """
     def __init__(self, alpha=1, beta=1, offset=0, ctr_weight=1, dt_weight=1,
-                 is_calc_inst_weight=False, ips_mode='ciips',
+                 is_calc_inst_weight=False, ips_mode='cips',
                  lambda_cap: float = 10.0):
         super(Causal_Weighted_Loss, self).__init__()
         self.name = 'causal_weighted'
         self.is_calc_inst_weight, self.ips_mode = is_calc_inst_weight, ips_mode
         self.lambda_cap = lambda_cap
-        if ips_mode not in ['ips', 'ciips', 'snips', 'dr', 'mrdr', ""]:
+        if ips_mode not in ['ips', 'cips', 'snips', 'dr', 'mrdr', ""]:
             raise ValueError("ips_mode not supported: {}".format(ips_mode))
 
         self.alpha = alpha
@@ -179,11 +226,10 @@ class Causal_Weighted_Loss(nn.Module):
         # 2) compute inverse propensity score for loss2
         raw_loss2 = F.cross_entropy(pc_time_logits, pc_time_targets, reduction='none')  # CE(none) on clicked samples
         p_click = input0[mask].clone().detach().clamp(min=1e-6)   # [K]
-        # print('debug printing p_click---\n', p_click)
         if self.ips_mode == 'ips':
             w = (1.0 / p_click)
             self.loss2 = (raw_loss2 * w).mean()
-        elif self.ips_mode == 'ciips':
+        elif self.ips_mode == 'cips':
             # compute clip‐IPS weights on *all* samples, then index by mask
             w = (1.0 / p_click).clamp(max=self.lambda_cap)
             self.loss2 = (raw_loss2 * w).mean()
