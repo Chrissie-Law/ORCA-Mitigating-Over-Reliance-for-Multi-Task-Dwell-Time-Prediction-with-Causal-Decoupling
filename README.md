@@ -18,7 +18,7 @@ We observe that multi-task learning (MTL) models often skew dwell-time (DT) pred
 
 
 <div align="center">
-      <img src="./fig/heatmap.png" width="90%" alt="CTR–DT heatmaps of clicked impressions for the ground truth and classical models, and causal graph of MTL.">
+      <img src="./fig/heatmap.png" width="80%" alt="CTR–DT heatmaps of clicked impressions for the ground truth and classical models, and causal graph of MTL.">
       <p><strong><figcaption>Figure 1:</strong> CTR–DT heatmaps of clicked impressions for the ground truth and classical models, and causal graph of MTL. <i>X</i>: input, <i>C</i>: clicks, <i>T</i>: dwell time, <i>U</i>: unobserved factors.</p>
 </div>
 
