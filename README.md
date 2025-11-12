@@ -1,13 +1,31 @@
 # ORCA: Mitigating Over-Reliance for Multi-Task Dwell Time Prediction with Causal Decoupling
-> Official implementation of ORCA (CIKM 2025, Short Paper)
+> Official implementation of **ORCA**, accepted as a Short Paper at **CIKM 2025**.
 
-This is the official implementation of **ORCA**, a causal-decoupling framework for multi-task recommendation that mitigates CTR-driven over-reliance in dwell time prediction.  
-Our paper is accepted at **CIKM 2025 (Short Paper)**.  
+ORCA is a causal-decoupling framework for multi-task recommendation learning, designed to mitigate CTR-driven over-reliance in dwell time prediction.  
+This repository provides the official implementation of the paper.
 
 - :page_facing_up: [Paper on arXiv (**recommended**)](https://arxiv.org/abs/2508.16573)  
-- :globe_with_meridians: [Official CIKM 2025 Paper (to appear)](PROJECT_PAGE_PLACEHOLDER)  
+- :globe_with_meridians: [Official CIKM 2025 Version](https://dl.acm.org/doi/10.1145/3746252.3760898)  
 
-The official citation will be updated here upon publication.
+If you find this work useful in your research, please cite:
+```bibtex
+@inproceedings{10.1145/3746252.3760898,
+author = {Luo, Huishi and Zhuang, Fuzhen and Zhu, Yongchun and Wu, Yiqing and Kang, Bo and Xie, Ruobing and Xia, Feng and Wang, Deqing and Dong, Jin},
+title = {ORCA: Mitigating Over-Reliance for Multi-Task Dwell Time Prediction with Causal Decoupling},
+year = {2025},
+isbn = {9798400720406},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/3746252.3760898},
+doi = {10.1145/3746252.3760898},
+booktitle = {Proceedings of the 34th ACM International Conference on Information and Knowledge Management},
+pages = {4996–5000},
+numpages = {5},
+keywords = {causal learning, dwell time prediction, multi-task learning},
+location = {Seoul, Republic of Korea},
+series = {CIKM '25}
+}
+```
 
 ---
 
